@@ -1,0 +1,28 @@
+# Archetype definitions for career-ops evaluation
+# Single source of truth — referenced by modes/_shared.md and batch/batch-prompt.md.
+# To customize for your career, override in modes/_profile.md instead of editing here.
+
+archetypes:
+  - name: AI Platform / LLMOps
+    signals: [observability, evals, pipelines, monitoring, reliability]
+    buy: Someone who puts AI in production with metrics
+
+  - name: Agentic / Automation
+    signals: [agent, HITL, orchestration, workflow, multi-agent]
+    buy: Someone who builds reliable agent systems
+
+  - name: Technical AI PM
+    signals: [PRD, roadmap, discovery, stakeholder, "product manager"]
+    buy: Someone who translates business to AI product
+
+  - name: AI Solutions Architect
+    signals: [architecture, enterprise, integration, design, systems]
+    buy: Someone who designs end-to-end AI architectures
+
+  - name: AI Forward Deployed
+    signals: [client-facing, deploy, prototype, "fast delivery", field]
+    buy: Someone who delivers AI solutions to clients fast
+
+  - name: AI Transformation
+    signals: ["change management", adoption, enablement, transformation]
+    buy: Someone who leads AI transformation in an org
