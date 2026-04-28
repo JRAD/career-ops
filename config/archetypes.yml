@@ -1,28 +1,28 @@
 # Archetype definitions for career-ops evaluation
-# Single source of truth — referenced by modes/_shared.md and batch/batch-prompt.md.
-# To customize for your career, override in modes/_profile.md instead of editing here.
+# Single source of truth — referenced by modes/_shared.md and batch workers.
+# To customize framing and proof points per archetype, edit modes/_profile.md.
 
 archetypes:
-  - name: AI Platform / LLMOps
-    signals: [observability, evals, pipelines, monitoring, reliability]
-    buy: Someone who puts AI in production with metrics
+  - name: Backend / API Engineer
+    signals: [REST, API, microservices, GraphQL, PostgreSQL, MySQL, Redis, "feature development", "product team", "user-facing", endpoints]
+    buy: Someone who ships reliable backend features and APIs at production scale
 
-  - name: Agentic / Automation
-    signals: [agent, HITL, orchestration, workflow, multi-agent]
-    buy: Someone who builds reliable agent systems
+  - name: Platform / Infrastructure Engineer
+    signals: [platform, "developer experience", "internal tooling", reliability, SLO, SLA, Kubernetes, observability, "developer productivity", "build systems"]
+    buy: Someone who multiplies other engineers' productivity through platforms and tooling
 
-  - name: Technical AI PM
-    signals: [PRD, roadmap, discovery, stakeholder, "product manager"]
-    buy: Someone who translates business to AI product
+  - name: Data / Streaming Engineer
+    signals: ["data pipeline", ETL, Kafka, Spark, Flink, streaming, "batch processing", "data infrastructure", "high throughput", "event-driven"]
+    buy: Someone who builds reliable data infrastructure and pipelines at scale
 
-  - name: AI Solutions Architect
-    signals: [architecture, enterprise, integration, design, systems]
-    buy: Someone who designs end-to-end AI architectures
+  - name: Distributed Systems Engineer
+    signals: ["distributed systems", scalability, "low latency", "high performance", consensus, sharding, caching, "systems design", concurrency, "database internals"]
+    buy: Someone with deep systems expertise for hard scalability and reliability problems
 
-  - name: AI Forward Deployed
-    signals: [client-facing, deploy, prototype, "fast delivery", field]
-    buy: Someone who delivers AI solutions to clients fast
+  - name: SDET / Test Automation Engineer
+    signals: ["test automation", Selenium, Playwright, Cypress, "test framework", "automated testing", "CI/CD", "quality assurance", QA, "end-to-end testing", "integration testing"]
+    buy: Someone who builds automation frameworks that replace manual testing and integrate with CI/CD
 
-  - name: AI Transformation
-    signals: ["change management", adoption, enablement, transformation]
-    buy: Someone who leads AI transformation in an org
+  - name: Quality / Performance Engineer
+    signals: ["quality platform", "performance testing", "load testing", k6, JMeter, Gatling, "reliability testing", "quality metrics", chaos, benchmarks, "test infrastructure"]
+    buy: Someone who builds quality and performance engineering into the development process at scale
