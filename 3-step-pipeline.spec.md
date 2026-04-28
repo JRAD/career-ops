@@ -31,7 +31,7 @@ The current batch pipeline runs full evaluation (Blocks A–G + PDF + tracker en
 ## 3. Non-Goals
 
 - Replacing or modifying `scan.mjs` (Step 0 is out of scope)
-- Changes to interactive (non-batch) evaluation modes (`oferta`, `pipeline`, etc.)
+- Changes to the evaluation *logic* of interactive modes (`oferta`, `pipeline`, etc.) — translation to English is in scope for Phase 0, logic changes are not
 - Building a UI for the curation step — editing a TSV file is sufficient
 - Removing `batch-prompt.md` or the `claude -p` path immediately — deprecated, not deleted
 
@@ -339,9 +339,37 @@ See batch/README.md for the full workflow.
 |---|---|
 | `batch/batch-prompt.md` | Add deprecation header; retained for manual `claude -p` use |
 
+### Deleted in Phase 0
+
+| File / Directory | Reason |
+|---|---|
+| `modes/de/` | Language variant unused; ~200 lines of context noise |
+| `modes/fr/` | Language variant unused; ~200 lines of context noise |
+| `modes/ja/` | Language variant unused; ~220 lines of context noise |
+| `modes/pt/` | Language variant unused; ~215 lines of context noise |
+| `modes/ru/` | Language variant unused; ~215 lines of context noise |
+| `update-system.mjs` (disabled, not deleted) | Upstream update check points to `santifer/career-ops`; will conflict with system-layer changes made in Phases 1–5. Remove the session-start invocation from `CLAUDE.md`; retain the file itself in case the user wants to re-purpose it for their own versioning later. |
+| `gemini-eval.mjs` | Remove if Gemini CLI is not in use; confirm with user before deleting |
+| `.gemini/commands/` | Remove if Gemini CLI is not in use; confirm with user before deleting |
+| `.opencode/commands/` | Remove if OpenCode is not in use; confirm with user before deleting |
+
 ---
 
 ## 8. Implementation Plan
+
+### Phase 0 — Fork Cleanup
+
+Establish clean ownership of the codebase before any new code is written. Two tiers:
+
+**Blocking — must complete before Phase 1:**
+- Remove the upstream update check invocation from `CLAUDE.md` (the `node update-system.mjs check` silent session-start call). The mechanism points at `santifer/career-ops`; applying an upstream update during Phase 1–5 work would overwrite new system-layer files. Retain `update-system.mjs` itself for potential re-use.
+- Delete all unused language variant directories: `modes/de/`, `modes/fr/`, `modes/ja/`, `modes/pt/`, `modes/ru/`. Roughly 1,050 lines of evaluation logic in languages not in use. No functional impact — these directories are only loaded when `language.modes_dir` is set in `profile.yml`, which it isn't.
+
+**Non-blocking — complete before Phase 2:**
+- Translate all primary interactive modes to English. These are used in one-off interactive sessions (paste a URL, ask for a PDF). They still function in Spanish but produce Spanish-language evaluation output and create friction when inspecting or modifying them. Files: `modes/oferta.md`, `modes/pdf.md`, `modes/apply.md`, `modes/contacto.md`, `modes/pipeline.md`, `modes/scan.md`, `modes/batch.md`, `modes/deep.md`, `modes/ofertas.md`, `modes/tracker.md`, `modes/patterns.md`, `modes/followup.md`, `modes/interview-prep.md`, `modes/training.md`, `modes/project.md`, `modes/latex.md`, `modes/auto-pipeline.md`. Translate prose and instructions; do not change evaluation logic.
+- Update `config/archetypes.yml` to reflect the user's actual target roles. The current archetypes mirror santifer's AI/automation career. This file drives archetype detection in every triage and deep eval run — getting it right before Phase 2 means the triage system prompt is calibrated from day one.
+- Update `CLAUDE.md` origin section — remove or replace the santifer attribution and portfolio link.
+- Confirm and remove unused CLI tooling: `gemini-eval.mjs` and `.gemini/commands/` if not using Gemini CLI; `.opencode/commands/` if not using OpenCode. Ask the user before deleting.
 
 ### Phase 1 — SDK Foundation
 
@@ -391,6 +419,40 @@ Prerequisite for both workers. No changes to the evaluation pipeline yet.
 ---
 
 ## 9. Task List
+
+### Phase 0 — Fork Cleanup
+
+**Blocking (complete before Phase 1):**
+- [ ] Remove `node update-system.mjs check` invocation from `CLAUDE.md` session-start instructions
+- [ ] Delete `modes/de/`
+- [ ] Delete `modes/fr/`
+- [ ] Delete `modes/ja/`
+- [ ] Delete `modes/pt/`
+- [ ] Delete `modes/ru/`
+
+**Non-blocking (complete before Phase 2):**
+- [ ] Confirm with user: remove `gemini-eval.mjs` and `.gemini/commands/`?
+- [ ] Confirm with user: remove `.opencode/commands/`?
+- [ ] Translate `modes/oferta.md` to English
+- [ ] Translate `modes/pdf.md` to English
+- [ ] Translate `modes/apply.md` to English
+- [ ] Translate `modes/contacto.md` to English
+- [ ] Translate `modes/pipeline.md` to English
+- [ ] Translate `modes/scan.md` to English
+- [ ] Translate `modes/batch.md` to English
+- [ ] Translate `modes/deep.md` to English
+- [ ] Translate `modes/ofertas.md` to English
+- [ ] Translate `modes/tracker.md` to English
+- [ ] Translate `modes/patterns.md` to English
+- [ ] Translate `modes/followup.md` to English
+- [ ] Translate `modes/interview-prep.md` to English
+- [ ] Translate `modes/training.md` to English
+- [ ] Translate `modes/project.md` to English
+- [ ] Translate `modes/latex.md` to English
+- [ ] Translate `modes/auto-pipeline.md` to English
+- [ ] Update `config/archetypes.yml` — replace santifer's AI/automation archetypes with user's actual target roles
+- [ ] Update `CLAUDE.md` origin section — remove santifer attribution and portfolio link
+- [ ] Verify `modes/_shared.md` and `modes/_profile.md` read cleanly in English context after language variants removed
 
 ### Phase 1 — SDK Foundation
 
