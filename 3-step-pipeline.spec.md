@@ -4,6 +4,10 @@
 **Created:** 2026-04-28  
 **Scope:** Restructure the batch evaluation pipeline from a monolithic single-pass flow into a three-stage process with a human curation gate between lightweight triage and full deep evaluation.
 
+**Related documents:**
+- [Implementation Plan](3-step-pipeline.implementation.md)
+- [Task List](3-step-pipeline.tasks.md)
+
 ---
 
 ## 1. Problem Statement
@@ -349,210 +353,13 @@ See batch/README.md for the full workflow.
 | `modes/pt/` | Language variant unused; ~215 lines of context noise |
 | `modes/ru/` | Language variant unused; ~215 lines of context noise |
 | `update-system.mjs` (disabled, not deleted) | Upstream update check points to `santifer/career-ops`; will conflict with system-layer changes made in Phases 1–5. Remove the session-start invocation from `CLAUDE.md`; retain the file itself in case the user wants to re-purpose it for their own versioning later. |
-| `gemini-eval.mjs` | Remove if Gemini CLI is not in use; confirm with user before deleting |
-| `.gemini/commands/` | Remove if Gemini CLI is not in use; confirm with user before deleting |
-| `.opencode/commands/` | Remove if OpenCode is not in use; confirm with user before deleting |
+| `gemini-eval.mjs` | Removed — Gemini CLI not in use |
+| `.gemini/commands/` | Removed — Gemini CLI not in use |
+| `.opencode/commands/` | Removed — OpenCode not in use |
 
 ---
 
-## 8. Implementation Plan
-
-### Phase 0 — Fork Cleanup
-
-Establish clean ownership of the codebase before any new code is written. Two tiers:
-
-**Blocking — must complete before Phase 1:**
-- Remove the upstream update check invocation from `CLAUDE.md` (the `node update-system.mjs check` silent session-start call). The mechanism points at `santifer/career-ops`; applying an upstream update during Phase 1–5 work would overwrite new system-layer files. Retain `update-system.mjs` itself for potential re-use.
-- Delete all unused language variant directories: `modes/de/`, `modes/fr/`, `modes/ja/`, `modes/pt/`, `modes/ru/`. Roughly 1,050 lines of evaluation logic in languages not in use. No functional impact — these directories are only loaded when `language.modes_dir` is set in `profile.yml`, which it isn't.
-
-**Non-blocking — complete before Phase 2:**
-- Translate all primary interactive modes to English. These are used in one-off interactive sessions (paste a URL, ask for a PDF). They still function in Spanish but produce Spanish-language evaluation output and create friction when inspecting or modifying them. Files: `modes/oferta.md`, `modes/pdf.md`, `modes/apply.md`, `modes/contacto.md`, `modes/pipeline.md`, `modes/scan.md`, `modes/batch.md`, `modes/deep.md`, `modes/ofertas.md`, `modes/tracker.md`, `modes/patterns.md`, `modes/followup.md`, `modes/interview-prep.md`, `modes/training.md`, `modes/project.md`, `modes/latex.md`, `modes/auto-pipeline.md`. Translate prose and instructions; do not change evaluation logic.
-- Update `config/archetypes.yml` to reflect the user's actual target roles. The current archetypes mirror santifer's AI/automation career. This file drives archetype detection in every triage and deep eval run — getting it right before Phase 2 means the triage system prompt is calibrated from day one.
-- Update `CLAUDE.md` origin section — remove or replace the santifer attribution and portfolio link.
-- Confirm and remove unused CLI tooling: `gemini-eval.mjs` and `.gemini/commands/` if not using Gemini CLI; `.opencode/commands/` if not using OpenCode. Ask the user before deleting.
-
-### Phase 1 — SDK Foundation
-
-Prerequisite for both workers. No changes to the evaluation pipeline yet.
-
-- Add `@anthropic-ai/sdk` to `package.json`
-- Create `batch/lib/` directory
-- Write `batch/lib/worker-utils.mjs`
-  - `readProjectFile` / `writeProjectFile` utilities
-  - Tool definitions object (read_file, write_file, bash, web_fetch, web_search)
-  - `executeTool` dispatcher
-  - `runAgentLoop` (send → tool calls → results → repeat until end_turn)
-  - `logCacheMetrics` (logs to stderr: input tokens, cache read, cache write)
-- Smoke test: minimal SDK call with cache_control, verify cache metrics appear in stderr
-
-### Phase 2 — Triage Pipeline
-
-- Write `modes/triage.md` (system prompt: archetype detection, Blocks A+B, G-text, comp signal, JSON output schema)
-- Write `batch/batch-worker-triage.mjs`
-- Write `batch/build-curation.mjs`
-- Add `--mode=triage` to `batch/batch-runner.sh`
-- End-to-end test: 3–5 jobs through full triage flow
-- Validate: triage JSON schema, prompt cache hit on jobs 2+, curation.tsv generation
-
-### Phase 3 — Curation Workflow
-
-- Document `curation.tsv` format in `batch/README.md`
-- Test `build-curation.mjs` idempotency (re-running does not overwrite filled decisions)
-- Manual walkthrough: triage → build-curation → fill decisions → verify APPROVE rows
-
-### Phase 4 — Deep Eval Pipeline
-
-- Write `batch/batch-system.md` (system prompt: full Blocks C–G, output formats, global rules)
-- Write `batch/batch-worker-deep.mjs` (reads triage JSON for A+B, runs C–G, generates report + PDF + TSV)
-- Add `--mode=deep` to `batch/batch-runner.sh`
-- Implement optional Brave Search tool (gated on `BRAVE_API_KEY`)
-- End-to-end test: approved jobs through full deep eval → report, PDF, tracker entry
-
-### Phase 5 — Integration & Cleanup
-
-- Update `CLAUDE.md` pipeline section
-- Add deprecation notice to `batch/batch-prompt.md`
-- Remove resolved-prompt temp file logic from `batch-runner.sh` (no longer needed)
-- Full end-to-end test: scan → triage → curation → deep eval → merge → verify
-- Update `batch/README.md` with full workflow documentation
-
----
-
-## 9. Task List
-
-### Phase 0 — Fork Cleanup
-
-**Blocking (complete before Phase 1):**
-- [ ] Remove `node update-system.mjs check` invocation from `CLAUDE.md` session-start instructions
-- [ ] Delete `modes/de/`
-- [ ] Delete `modes/fr/`
-- [ ] Delete `modes/ja/`
-- [ ] Delete `modes/pt/`
-- [ ] Delete `modes/ru/`
-
-**Non-blocking (complete before Phase 2):**
-- [ ] Confirm with user: remove `gemini-eval.mjs` and `.gemini/commands/`?
-- [ ] Confirm with user: remove `.opencode/commands/`?
-- [ ] Translate `modes/oferta.md` to English
-- [ ] Translate `modes/pdf.md` to English
-- [ ] Translate `modes/apply.md` to English
-- [ ] Translate `modes/contacto.md` to English
-- [ ] Translate `modes/pipeline.md` to English
-- [ ] Translate `modes/scan.md` to English
-- [ ] Translate `modes/batch.md` to English
-- [ ] Translate `modes/deep.md` to English
-- [ ] Translate `modes/ofertas.md` to English
-- [ ] Translate `modes/tracker.md` to English
-- [ ] Translate `modes/patterns.md` to English
-- [ ] Translate `modes/followup.md` to English
-- [ ] Translate `modes/interview-prep.md` to English
-- [ ] Translate `modes/training.md` to English
-- [ ] Translate `modes/project.md` to English
-- [ ] Translate `modes/latex.md` to English
-- [ ] Translate `modes/auto-pipeline.md` to English
-- [ ] Update `config/archetypes.yml` — replace santifer's AI/automation archetypes with user's actual target roles
-- [ ] Update `CLAUDE.md` origin section — remove santifer attribution and portfolio link
-- [ ] Verify `modes/_shared.md` and `modes/_profile.md` read cleanly in English context after language variants removed
-
-### Phase 1 — SDK Foundation
-
-- [ ] Add `@anthropic-ai/sdk` to `package.json`
-- [ ] Run `npm install` and confirm SDK resolves
-- [ ] Create `batch/lib/` directory
-- [ ] Write `batch/lib/worker-utils.mjs`
-  - [ ] `readProjectFile(relPath, required)` utility
-  - [ ] `writeProjectFile(relPath, content)` utility
-  - [ ] Tool definitions: `read_file`, `write_file`, `bash`, `web_fetch`
-  - [ ] Optional tool definition: `web_search` (Brave API)
-  - [ ] `executeTool(name, input, projectDir)` dispatcher with error handling
-  - [ ] `runAgentLoop(client, params)` — handles tool_use loop until end_turn or maxIter
-  - [ ] `logCacheMetrics(usage)` — stderr output of input/cache_read/cache_write tokens
-- [ ] Write minimal smoke test confirming SDK call works and cache metrics log
-
-### Phase 2 — Triage Pipeline
-
-- [ ] Write `modes/triage.md`
-  - [ ] Intro: worker role and output contract
-  - [ ] Sources of truth section (cv.md, profile.yml, _profile.md, archetypes.yml)
-  - [ ] Archetype detection instruction (read `config/archetypes.yml`)
-  - [ ] Block A specification (role summary table)
-  - [ ] Block B specification (CV match score, top matches, top gaps with severity)
-  - [ ] Block G text-only specification (description quality, reposting check)
-  - [ ] Comp signal specification (6 values, read from JD text only)
-  - [ ] JSON output schema (matches spec section 5)
-  - [ ] Tool use instructions (`read_file` for scan-history.tsv, `web_fetch` for JD)
-  - [ ] Global rules (NEVER invent, NEVER hardcode metrics)
-- [ ] Write `batch/batch-worker-triage.mjs`
-  - [ ] CLI arg parsing (`--id`, `--url`, `--jd-file`, `--date`, `--model`)
-  - [ ] Load and assemble cached context (cv.md, profile.yml, _profile.md, article-digest.md, archetypes.yml)
-  - [ ] Build per-job task message
-  - [ ] Call `runAgentLoop` via worker-utils
-  - [ ] Parse JSON from final response (handle markdown code fences)
-  - [ ] Write `batch/triage-output/{id}.json`
-  - [ ] Print compact summary to stdout for orchestrator log
-  - [ ] Print cache metrics to stderr
-- [ ] Write `batch/build-curation.mjs`
-  - [ ] Read all `batch/triage-output/*.json`
-  - [ ] Read existing `batch/curation.tsv` if present (preserve filled decisions)
-  - [ ] Generate/update `curation.tsv` sorted by score descending
-  - [ ] Print summary: new rows added, existing decisions preserved, pending count
-- [ ] Modify `batch/batch-runner.sh`
-  - [ ] Add `--mode` parameter to arg parsing (default: print migration warning)
-  - [ ] Add `--mode=triage` dispatch: reads `batch-input.tsv`, calls `batch-worker-triage.mjs`
-  - [ ] `triage-state.tsv` init, update, and state check functions
-  - [ ] Post-triage message: prompt user to run `build-curation.mjs`
-- [ ] End-to-end triage test with 3–5 real jobs
-- [ ] Verify prompt cache hit on jobs 2+ (check stderr cache_read > 0)
-
-### Phase 3 — Curation Workflow
-
-- [ ] Document `curation.tsv` format and workflow in `batch/README.md`
-- [ ] Test `build-curation.mjs` idempotency: run twice, confirm no decisions overwritten
-- [ ] Manual walkthrough: fill decisions in curation.tsv, confirm APPROVE rows are correct input for Step 3
-
-### Phase 4 — Deep Eval Pipeline
-
-- [ ] Write `batch/batch-system.md`
-  - [ ] Sources of truth (same as triage, plus cv-template.html)
-  - [ ] Note: Blocks A+B will be provided in context from triage — do not re-run
-  - [ ] Block C specification (level & strategy)
-  - [ ] Block D specification (comp research — WebSearch if available, else training knowledge + JD signals)
-  - [ ] Block E specification (personalization plan)
-  - [ ] Block F specification (interview prep, STAR+R stories, story bank update)
-  - [ ] Block G full specification (all signals including layoff check)
-  - [ ] Report output format (full A–G report, same schema as `oferta.md`)
-  - [ ] PDF generation instructions
-  - [ ] Tracker TSV instructions
-  - [ ] Global rules (NUNCA/SIEMPRE)
-- [ ] Write `batch/batch-worker-deep.mjs`
-  - [ ] CLI arg parsing (`--id`, `--url`, `--triage-file`, `--report-num`, `--date`, `--model`)
-  - [ ] Load triage JSON and inject Blocks A+B into prompt context
-  - [ ] Cold-start handling: if triage JSON missing, run Blocks A+B from scratch
-  - [ ] Load and assemble cached context
-  - [ ] Build per-job task message (reference injected A+B, instruct C–G)
-  - [ ] Optional Brave Search tool (check `BRAVE_API_KEY` env var)
-  - [ ] Call `runAgentLoop` with full tool set
-  - [ ] Print JSON summary to stdout
-- [ ] Modify `batch/batch-runner.sh`
-  - [ ] Add `--mode=deep` dispatch: reads `curation.tsv`, filters `decision = APPROVE`
-  - [ ] Deep mode uses `batch-state.tsv` (existing schema, unchanged)
-  - [ ] Post-deep run: call `merge-tracker.mjs` and `verify-pipeline.mjs`
-- [ ] End-to-end deep eval test with 2–3 approved jobs
-- [ ] Verify: report created, PDF generated, tracker TSV written, merge succeeds
-
-### Phase 5 — Integration & Cleanup
-
-- [ ] Update `CLAUDE.md` pipeline section with 3-step flow description
-- [ ] Add deprecation header to `batch/batch-prompt.md`
-- [ ] Remove resolved-prompt temp file logic from `batch-runner.sh`
-- [ ] Rewrite `batch/README.md` (new workflow, new commands, curation step)
-- [ ] Full end-to-end run: scan → triage (5+ jobs) → curation → deep eval (2+ jobs) → merge → verify
-- [ ] Run `node verify-pipeline.mjs` — confirm clean output
-- [ ] Review cache metrics across a full batch: confirm savings match estimate
-
----
-
-## 10. Open Questions
+## 8. Open Questions
 
 | # | Question | Default if unresolved |
 |---|---|---|
