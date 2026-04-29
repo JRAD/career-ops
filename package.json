@@ -15,7 +15,9 @@
     "rollback": "node update-system.mjs rollback",
     "liveness": "node check-liveness.mjs",
     "scan": "node scan.mjs",
-    "gemini:eval": "node gemini-eval.mjs"
+    "triage": "bash batch/batch-runner.sh --mode=triage",
+    "curation": "node batch/build-curation.mjs",
+    "deep": "bash batch/batch-runner.sh --mode=deep"
   },
   "keywords": [
     "ai",
@@ -32,7 +34,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@google/generative-ai": "^0.24.1",
+    "@anthropic-ai/sdk": "0.36.3",
     "dotenv": "^16.4.5",
     "js-yaml": "^4.1.1",
     "playwright": "^1.58.1"
