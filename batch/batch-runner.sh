@@ -22,6 +22,7 @@ STATE_LOCK_TIMEOUT_SECONDS=30
 MAIN_PID="${BASHPID:-$$}"
 
 # Defaults
+MODE=""
 PARALLEL=1
 DRY_RUN=false
 RETRY_FAILED=false
@@ -31,51 +32,67 @@ MIN_SCORE=0
 
 usage() {
   cat <<'USAGE'
-career-ops batch runner — process job offers in batch via claude -p workers
-Uses your default Claude model (Claude Max subscription).
+career-ops batch runner — 3-step evaluation pipeline orchestrator
 
-Usage: batch-runner.sh [OPTIONS]
+Usage: batch-runner.sh --mode=<mode> [OPTIONS]
+
+Modes:
+  --mode=triage        Step 1 — run fit assessment on all scanned jobs
+  --mode=deep          Step 3 — run full evaluation on approved jobs [Phase 4]
 
 Options:
-  --parallel N         Number of parallel workers (default: 1)
+  --parallel N         Number of parallel workers (default: 1, triage only)
   --dry-run            Show what would be processed, don't execute
-  --retry-failed       Only retry offers marked as "failed" in state
-  --start-from N       Start from offer ID N (skip earlier IDs)
-  --max-retries N      Max retry attempts per offer (default: 2)
-  --min-score N        Skip PDF/tracker for offers scoring below N (default: 0 = off)
+  --retry-failed       Only retry jobs marked as "failed" in state
+  --start-from N       Start from job ID N (skip earlier IDs)
+  --max-retries N      Max retry attempts per job (default: 2)
   -h, --help           Show this help
 
+Workflow:
+  Step 0  node scan.mjs                          → batch/batch-input.tsv
+  Step 1  ./batch/batch-runner.sh --mode=triage  → batch/triage-output/{id}.json
+  Step 2  node batch/build-curation.mjs          → fill batch/curation.tsv
+  Step 3  ./batch/batch-runner.sh --mode=deep    → reports/ + output/ + tracker
+
 Files:
-  batch-input.tsv      Input offers (id, url, source, notes)
-  batch-state.tsv      Processing state (auto-managed)
-  batch-prompt.md      Prompt template for workers
-  logs/                Per-offer logs
-  tracker-additions/   Tracker lines for post-batch merge
+  batch-input.tsv          Input jobs (id, url, source, notes)
+  triage-state.tsv         Triage progress (auto-managed)
+  batch-state.tsv          Deep eval progress (auto-managed)
+  triage-output/{id}.json  Per-job triage result
+  curation.tsv             Human curation decisions (APPROVE / SKIP)
+  logs/                    Per-job logs
+  tracker-additions/       Tracker TSV lines for post-batch merge
 
 Examples:
-  # Dry run to see pending offers
-  ./batch-runner.sh --dry-run
+  # See what triage jobs are pending
+  ./batch-runner.sh --mode=triage --dry-run
 
-  # Process all pending
-  ./batch-runner.sh
+  # Run triage on all pending jobs
+  ./batch-runner.sh --mode=triage
 
-  # Retry only failed offers
-  ./batch-runner.sh --retry-failed
+  # Run triage with 3 workers in parallel
+  ./batch-runner.sh --mode=triage --parallel 3
 
-  # Process 2 at a time starting from ID 10
-  ./batch-runner.sh --parallel 2 --start-from 10
+  # After filling curation.tsv, run deep eval on approved jobs
+  ./batch-runner.sh --mode=deep
 USAGE
 }
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --mode=*) MODE="${1#--mode=}"; shift ;;
+    --mode) MODE="$2"; shift 2 ;;
     --parallel) PARALLEL="$2"; shift 2 ;;
+    --parallel=*) PARALLEL="${1#--parallel=}"; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
     --retry-failed) RETRY_FAILED=true; shift ;;
     --start-from) START_FROM="$2"; shift 2 ;;
+    --start-from=*) START_FROM="${1#--start-from=}"; shift ;;
     --max-retries) MAX_RETRIES="$2"; shift 2 ;;
+    --max-retries=*) MAX_RETRIES="${1#--max-retries=}"; shift ;;
     --min-score) MIN_SCORE="$2"; shift 2 ;;
+    --min-score=*) MIN_SCORE="${1#--min-score=}"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1"; usage; exit 1 ;;
   esac
@@ -393,7 +410,271 @@ process_offer() {
   fi
 }
 
-# Merge tracker additions into applications.md
+# ── Triage state helpers ─────────────────────────────────────────────────────
+# Triage uses the same 9-column TSV schema as batch-state.tsv.
+# report_num is always "-" for triage (not applicable).
+
+TRIAGE_STATE_FILE="$BATCH_DIR/triage-state.tsv"
+TRIAGE_OUTPUT_DIR="$BATCH_DIR/triage-output"
+
+init_triage_state() {
+  if [[ ! -f "$TRIAGE_STATE_FILE" ]]; then
+    printf 'id\turl\tstatus\tstarted_at\tcompleted_at\treport_num\tscore\terror\tretries\n' > "$TRIAGE_STATE_FILE"
+  fi
+}
+
+get_triage_status() {
+  local id="$1"
+  if [[ ! -f "$TRIAGE_STATE_FILE" ]]; then echo "none"; return; fi
+  local status
+  status=$(awk -F'\t' -v id="$id" '$1 == id { print $3 }' "$TRIAGE_STATE_FILE")
+  echo "${status:-none}"
+}
+
+get_triage_retries() {
+  local id="$1"
+  if [[ ! -f "$TRIAGE_STATE_FILE" ]]; then echo "0"; return; fi
+  local retries
+  retries=$(awk -F'\t' -v id="$id" '$1 == id { print $9 }' "$TRIAGE_STATE_FILE")
+  echo "${retries:-0}"
+}
+
+update_triage_state() {
+  local id="$1" url="$2" status="$3" started="$4" completed="$5" score="$6" error="$7" retries="$8"
+
+  if [[ ! -f "$TRIAGE_STATE_FILE" ]]; then init_triage_state; fi
+
+  local tmp="$TRIAGE_STATE_FILE.tmp"
+  local found=false
+
+  head -1 "$TRIAGE_STATE_FILE" > "$tmp"
+
+  while IFS=$'\t' read -r sid surl sstatus sstarted scompleted sreport sscore serror sretries; do
+    [[ "$sid" == "id" ]] && continue
+    if [[ "$sid" == "$id" ]]; then
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$id" "$url" "$status" "$started" "$completed" "-" "$score" "$error" "$retries" >> "$tmp"
+      found=true
+    else
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$sid" "$surl" "$sstatus" "$sstarted" "$scompleted" "$sreport" "$sscore" "$serror" "$sretries" >> "$tmp"
+    fi
+  done < "$TRIAGE_STATE_FILE"
+
+  if [[ "$found" == "false" ]]; then
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$id" "$url" "$status" "$started" "$completed" "-" "$score" "$error" "$retries" >> "$tmp"
+  fi
+
+  mv "$tmp" "$TRIAGE_STATE_FILE"
+}
+
+# ── Triage mode ───────────────────────────────────────────────────────────────
+
+run_triage() {
+  if [[ ! -f "$INPUT_FILE" ]]; then
+    echo "ERROR: $INPUT_FILE not found. Run 'node scan.mjs' first to populate it."
+    exit 1
+  fi
+
+  if ! command -v node &>/dev/null; then
+    echo "ERROR: 'node' not found in PATH."
+    exit 1
+  fi
+
+  mkdir -p "$LOGS_DIR" "$TRIAGE_OUTPUT_DIR"
+  init_triage_state
+
+  local today
+  today=$(date +%Y-%m-%d)
+
+  local total_input
+  total_input=$(tail -n +2 "$INPUT_FILE" | grep -c '[^[:space:]]' 2>/dev/null || true)
+  total_input="${total_input:-0}"
+
+  echo "=== career-ops triage ==="
+  echo "Parallel: $PARALLEL | Max retries: $MAX_RETRIES"
+  echo "Input: $total_input jobs in $INPUT_FILE"
+  echo ""
+
+  # Build list of jobs to triage
+  local -a pending_ids=()
+  local -a pending_urls=()
+
+  while IFS=$'\t' read -r id url source notes; do
+    [[ "$id" == "id" ]] && continue
+    [[ -z "$id" || -z "$url" ]] && continue
+    [[ "$id" =~ ^[0-9]+$ ]] || continue
+    (( id < START_FROM )) && continue
+
+    local status
+    status=$(get_triage_status "$id")
+
+    if [[ "$RETRY_FAILED" == "true" ]]; then
+      [[ "$status" != "failed" ]] && continue
+      local retries
+      retries=$(get_triage_retries "$id")
+      (( retries >= MAX_RETRIES )) && { echo "SKIP #$id: max retries reached"; continue; }
+    else
+      [[ "$status" == "completed" ]] && continue
+      if [[ "$status" == "failed" ]]; then
+        local retries
+        retries=$(get_triage_retries "$id")
+        if (( retries >= MAX_RETRIES )); then
+          echo "SKIP #$id: failed and max retries reached (use --retry-failed to force)"
+          continue
+        fi
+      fi
+    fi
+
+    pending_ids+=("$id")
+    pending_urls+=("$url")
+  done < "$INPUT_FILE"
+
+  local pending_count=${#pending_ids[@]}
+
+  if (( pending_count == 0 )); then
+    echo "No jobs to triage."
+    triage_summary
+    exit 0
+  fi
+
+  echo "Pending: $pending_count jobs"
+  echo ""
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "=== DRY RUN ==="
+    for i in "${!pending_ids[@]}"; do
+      local s
+      s=$(get_triage_status "${pending_ids[$i]}")
+      echo "  #${pending_ids[$i]}: ${pending_urls[$i]} (status: $s)"
+    done
+    echo ""
+    echo "Would triage $pending_count jobs."
+    exit 0
+  fi
+
+  # Acquire process lock to prevent double execution
+  acquire_lock
+
+  # Process jobs (sequential or parallel)
+  triage_job() {
+    local id="$1" url="$2"
+    local started_at
+    started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    local retries
+    retries=$(get_triage_retries "$id")
+    local log_file="$LOGS_DIR/triage-${id}.log"
+    local tmp_out="/tmp/career-ops-triage-${id}.json"
+
+    echo "--- Triage #$id: $url"
+
+    local exit_code=0
+    node "$PROJECT_DIR/batch/batch-worker-triage.mjs" \
+      --id="$id" \
+      --url="$url" \
+      --date="$today" \
+      > "$tmp_out" \
+      2>> "$log_file" \
+      || exit_code=$?
+
+    local completed_at
+    completed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    if [[ $exit_code -eq 0 ]]; then
+      local out_file="$TRIAGE_OUTPUT_DIR/${id}.json"
+      mv "$tmp_out" "$out_file"
+      local score rec company role
+      score=$(node -e "try{const j=JSON.parse(require('fs').readFileSync('$out_file','utf8'));console.log(j.fit_score);}catch(e){console.log('-');}" 2>/dev/null || echo "-")
+      rec=$(node   -e "try{const j=JSON.parse(require('fs').readFileSync('$out_file','utf8'));console.log(j.recommendation);}catch(e){console.log('?');}" 2>/dev/null || echo "?")
+      company=$(node -e "try{const j=JSON.parse(require('fs').readFileSync('$out_file','utf8'));console.log(j.company);}catch(e){console.log('?');}" 2>/dev/null || echo "?")
+      role=$(node    -e "try{const j=JSON.parse(require('fs').readFileSync('$out_file','utf8'));console.log(j.role);}catch(e){console.log('?');}" 2>/dev/null || echo "?")
+      update_triage_state "$id" "$url" "completed" "$started_at" "$completed_at" "$score" "-" "$retries"
+      echo "    ✅ $company — $role | score=$score rec=$rec"
+    else
+      rm -f "$tmp_out"
+      local err_msg
+      err_msg=$(tail -3 "$log_file" 2>/dev/null | tr '\n' ' ' | cut -c1-200 || echo "exit code $exit_code")
+      retries=$((retries + 1))
+      update_triage_state "$id" "$url" "failed" "$started_at" "$completed_at" "-" "$err_msg" "$retries"
+      echo "    ❌ Failed (attempt $retries) — see $log_file"
+    fi
+  }
+
+  if (( PARALLEL <= 1 )); then
+    for i in "${!pending_ids[@]}"; do
+      triage_job "${pending_ids[$i]}" "${pending_urls[$i]}"
+    done
+  else
+    local running=0
+    local -a pids=()
+    for i in "${!pending_ids[@]}"; do
+      while (( running >= PARALLEL )); do
+        for j in "${!pids[@]}"; do
+          if ! kill -0 "${pids[$j]}" 2>/dev/null; then
+            wait "${pids[$j]}" 2>/dev/null || true
+            unset 'pids[j]'
+            running=$((running - 1))
+          fi
+        done
+        pids=("${pids[@]}")
+        sleep 1
+      done
+      triage_job "${pending_ids[$i]}" "${pending_urls[$i]}" &
+      pids+=($!)
+      running=$((running + 1))
+    done
+    for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
+  fi
+
+  triage_summary
+
+  echo ""
+  echo "Triage complete. Next step:"
+  echo "  node batch/build-curation.mjs"
+  echo "Then review batch/curation.tsv and mark jobs APPROVE or SKIP."
+  echo "Finally: ./batch/batch-runner.sh --mode=deep"
+}
+
+triage_summary() {
+  echo ""
+  echo "=== Triage Summary ==="
+  if [[ ! -f "$TRIAGE_STATE_FILE" ]]; then echo "No state file."; return; fi
+
+  local total=0 completed=0 failed=0
+  local strong=0 match=0 weak=0 skip=0
+
+  while IFS=$'\t' read -r sid _ sstatus _ _ _ sscore _ _; do
+    [[ "$sid" == "id" ]] && continue
+    total=$((total + 1))
+    case "$sstatus" in
+      completed) completed=$((completed + 1)) ;;
+      failed)    failed=$((failed + 1)) ;;
+    esac
+  done < "$TRIAGE_STATE_FILE"
+
+  # Count recommendations from output files
+  if [[ -d "$TRIAGE_OUTPUT_DIR" ]]; then
+    for f in "$TRIAGE_OUTPUT_DIR"/*.json; do
+      [[ -f "$f" ]] || continue
+      local rec
+      rec=$(node -e "try{const j=JSON.parse(require('fs').readFileSync('$f','utf8'));console.log(j.recommendation);}catch(e){}" 2>/dev/null || true)
+      case "$rec" in
+        STRONG_MATCH) strong=$((strong + 1)) ;;
+        MATCH)        match=$((match + 1)) ;;
+        WEAK_MATCH)   weak=$((weak + 1)) ;;
+        SKIP)         skip=$((skip + 1)) ;;
+      esac
+    done
+  fi
+
+  echo "Total: $total | Completed: $completed | Failed: $failed"
+  if (( completed > 0 )); then
+    echo "Recommendations: STRONG_MATCH=$strong MATCH=$match WEAK_MATCH=$weak SKIP=$skip"
+  fi
+}
+
+# ── Merge tracker additions into applications.md
 merge_tracker() {
   echo ""
   echo "=== Merging tracker additions ==="
@@ -442,6 +723,48 @@ print_summary() {
 
 # Main
 main() {
+  case "$MODE" in
+    triage)
+      run_triage
+      return
+      ;;
+    deep)
+      echo "ERROR: --mode=deep is not yet implemented (Phase 4)."
+      echo ""
+      echo "To run full evaluations manually:"
+      echo "  claude -p --dangerously-skip-permissions \\"
+      echo "    --append-system-prompt-file batch/batch-prompt.md \\"
+      echo "    'Process this job. URL: <url>'"
+      echo ""
+      echo "See batch/README.md for the current workflow."
+      exit 1
+      ;;
+    "")
+      echo ""
+      echo "⚠️  The batch pipeline has been restructured. --mode is now required."
+      echo ""
+      echo "  --mode=triage   Step 1 — fit assessment on all scanned jobs"
+      echo "  --mode=deep     Step 3 — full evaluation on approved jobs [Phase 4]"
+      echo ""
+      echo "Workflow:"
+      echo "  node scan.mjs"
+      echo "  ./batch/batch-runner.sh --mode=triage"
+      echo "  node batch/build-curation.mjs  →  fill batch/curation.tsv"
+      echo "  ./batch/batch-runner.sh --mode=deep"
+      echo ""
+      echo "See batch/README.md for details."
+      exit 1
+      ;;
+    *)
+      echo "Unknown mode: $MODE"
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+# Legacy deep-eval main body — preserved for Phase 4 refactor
+_legacy_main() {
   check_prerequisites
 
   if [[ "$DRY_RUN" == "false" ]]; then
