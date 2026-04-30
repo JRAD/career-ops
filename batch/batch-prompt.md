@@ -1,3 +1,24 @@
+<!--
+  ⚠️  DEPRECATED — This file is no longer used by the active batch pipeline.
+
+  The batch pipeline was restructured in April 2026 to use the Anthropic SDK
+  directly instead of `claude -p`. The new system prompts are:
+
+    modes/triage.md      — Step 1: fit assessment (Blocks A, B, G-text, comp)
+    modes/deep-eval.md   — Step 3: full evaluation (Blocks C, D, E, F, G-full)
+
+  Workers:
+    batch/batch-worker-triage.mjs
+    batch/batch-worker-deep.mjs
+
+  Orchestrator:
+    batch/batch-runner.sh --mode=triage | --mode=deep
+
+  See batch/README.md for the full workflow.
+
+  This file is kept for reference only. Do not feed it to claude -p workers.
+-->
+
 # career-ops Batch Worker — Evaluación Completa + PDF + Tracker Line
 
 Eres un worker de evaluación de ofertas de empleo for the candidate (read name from config/profile.yml). Recibes una oferta (URL + JD text) y produces:

@@ -138,7 +138,7 @@ This system is designed to be customized by YOU (AI Agent). When the user asks y
 - "Add these companies to my portals" → edit `portals.yml`
 - "Update my profile" → edit `config/profile.yml`
 - "Change the CV template design" → edit `templates/cv-template.html`
-- "Adjust the scoring weights" → edit `modes/_profile.md` for user-specific weighting, or edit `modes/_shared.md` and `batch/batch-prompt.md` only when changing the shared system defaults for everyone
+- "Adjust the scoring weights" → edit `modes/_profile.md` for user-specific weighting, or edit `modes/_shared.md` and `modes/triage.md` / `modes/deep-eval.md` only when changing the shared system defaults for everyone
 
 ### Skill Modes
 
@@ -157,7 +157,7 @@ This system is designed to be customized by YOU (AI Agent). When the user asks y
 | Fills out application form | `apply` |
 | Searches for new offers | `scan` |
 | Processes pending URLs | `pipeline` |
-| Batch processes offers | `batch` |
+| Batch processes offers (3-step SDK pipeline) | `batch` |
 | Asks about rejection patterns or wants to improve targeting | `patterns` |
 | Asks about follow-ups or application cadence | `followup` |
 
@@ -187,7 +187,7 @@ This system is designed to be customized by YOU (AI Agent). When the user asks y
 2. `browser_snapshot` to read content
 3. Only footer/navbar without JD = closed. Title + description + Apply = active.
 
-**Exception for batch workers (`claude -p`):** Playwright is not available in headless pipe mode. Use WebFetch as fallback and mark the report header with `**Verification:** unconfirmed (batch mode)`. The user can verify manually later.
+**Exception for batch workers (SDK pipeline):** Playwright is not available in headless SDK mode. Use WebFetch as fallback and mark the report header with `**Verification:** unconfirmed (batch mode)`. The user can verify manually later.
 
 ---
 
@@ -197,7 +197,8 @@ This system is designed to be customized by YOU (AI Agent). When the user asks y
 - Scripts in `.mjs`, configuration in YAML
 - Output in `output/` (gitignored), Reports in `reports/`
 - JDs in `jds/` (referenced as `local:jds/{file}` in pipeline.md)
-- Batch in `batch/` (gitignored except scripts and prompt)
+- Batch in `batch/` (gitignored except scripts and system prompts)
+- **3-step batch pipeline:** scan → triage → human curation → deep eval (see `batch/README.md`)
 - Report numbering: sequential 3-digit zero-padded, max existing + 1
 - **RULE: After each batch of evaluations, run `node merge-tracker.mjs`** to merge tracker additions and avoid duplications.
 - **RULE: NEVER create new entries in applications.md if company+role already exists.** Update the existing entry.
