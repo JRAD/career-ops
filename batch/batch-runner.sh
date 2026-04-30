@@ -38,7 +38,7 @@ Usage: batch-runner.sh --mode=<mode> [OPTIONS]
 
 Modes:
   --mode=triage        Step 1 — run fit assessment on all scanned jobs
-  --mode=deep          Step 3 — run full evaluation on approved jobs [Phase 4]
+  --mode=deep          Step 3 — run full evaluation on approved jobs
 
 Options:
   --parallel N         Number of parallel workers (default: 1, triage only)
@@ -684,6 +684,280 @@ merge_tracker() {
   node "$PROJECT_DIR/verify-pipeline.mjs" || echo "⚠️  Verification found issues (see above)"
 }
 
+# ── Deep eval state helpers ───────────────────────────────────────────────────
+# Reuses batch-state.tsv (same 9-column schema), but with report_num always
+# pre-allocated by the orchestrator before the worker starts.
+
+DEEP_STATE_FILE="$BATCH_DIR/batch-state.tsv"
+CURATION_FILE="$BATCH_DIR/curation.tsv"
+
+init_deep_state() {
+  if [[ ! -f "$DEEP_STATE_FILE" ]]; then
+    printf 'id\turl\tstatus\tstarted_at\tcompleted_at\treport_num\tscore\terror\tretries\n' > "$DEEP_STATE_FILE"
+  fi
+}
+
+get_deep_status() {
+  local id="$1"
+  if [[ ! -f "$DEEP_STATE_FILE" ]]; then echo "none"; return; fi
+  local status
+  status=$(awk -F'\t' -v id="$id" '$1 == id { print $3 }' "$DEEP_STATE_FILE")
+  echo "${status:-none}"
+}
+
+get_deep_retries() {
+  local id="$1"
+  if [[ ! -f "$DEEP_STATE_FILE" ]]; then echo "0"; return; fi
+  local retries
+  retries=$(awk -F'\t' -v id="$id" '$1 == id { print $9 }' "$DEEP_STATE_FILE")
+  echo "${retries:-0}"
+}
+
+update_deep_state() {
+  local id="$1" url="$2" status="$3" started="$4" completed="$5" report_num="$6" score="$7" error="$8" retries="$9"
+
+  if [[ ! -f "$DEEP_STATE_FILE" ]]; then init_deep_state; fi
+
+  local tmp="$DEEP_STATE_FILE.tmp"
+  local found=false
+
+  head -1 "$DEEP_STATE_FILE" > "$tmp"
+
+  while IFS=$'\t' read -r sid surl sstatus sstarted scompleted sreport sscore serror sretries; do
+    [[ "$sid" == "id" ]] && continue
+    if [[ "$sid" == "$id" ]]; then
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$id" "$url" "$status" "$started" "$completed" "$report_num" "$score" "$error" "$retries" >> "$tmp"
+      found=true
+    else
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$sid" "$surl" "$sstatus" "$sstarted" "$scompleted" "$sreport" "$sscore" "$serror" "$sretries" >> "$tmp"
+    fi
+  done < "$DEEP_STATE_FILE"
+
+  if [[ "$found" == "false" ]]; then
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$id" "$url" "$status" "$started" "$completed" "$report_num" "$score" "$error" "$retries" >> "$tmp"
+  fi
+
+  mv "$tmp" "$DEEP_STATE_FILE"
+}
+
+# ── Deep eval mode ────────────────────────────────────────────────────────────
+
+run_deep() {
+  if [[ ! -f "$CURATION_FILE" ]]; then
+    echo "ERROR: $CURATION_FILE not found."
+    echo "Run 'node batch/build-curation.mjs' first, then fill in APPROVE decisions."
+    exit 1
+  fi
+
+  if ! command -v node &>/dev/null; then
+    echo "ERROR: 'node' not found in PATH."
+    exit 1
+  fi
+
+  mkdir -p "$LOGS_DIR" "$TRACKER_DIR" "$REPORTS_DIR"
+  init_deep_state
+
+  local today
+  today=$(date +%Y-%m-%d)
+
+  # Read APPROVE rows from curation.tsv
+  # Columns: id, url, company, role, score, recommendation, archetype, legitimacy, comp_signal, summary, decision, notes
+  local -a pending_ids=()
+  local -a pending_urls=()
+
+  while IFS=$'\t' read -r cid curl ccompany crole cscore crec carch cleg ccomp csum cdec cnotes; do
+    # Skip comments and header
+    [[ "$cid" == "#"* ]] && continue
+    [[ "$cid" == "id" ]] && continue
+    [[ -z "$cid" ]] && continue
+    # Only process APPROVE rows
+    [[ "$cdec" != "APPROVE" ]] && continue
+    # Numeric ID guard
+    [[ "$cid" =~ ^[0-9]+$ ]] || continue
+    (( cid < START_FROM )) && continue
+
+    local status
+    status=$(get_deep_status "$cid")
+
+    if [[ "$RETRY_FAILED" == "true" ]]; then
+      [[ "$status" != "failed" ]] && continue
+      local retries
+      retries=$(get_deep_retries "$cid")
+      (( retries >= MAX_RETRIES )) && { echo "SKIP #$cid: max retries reached"; continue; }
+    else
+      [[ "$status" == "completed" ]] && continue
+      if [[ "$status" == "failed" ]]; then
+        local retries
+        retries=$(get_deep_retries "$cid")
+        if (( retries >= MAX_RETRIES )); then
+          echo "SKIP #$cid: failed and max retries reached (use --retry-failed to force)"
+          continue
+        fi
+      fi
+    fi
+
+    pending_ids+=("$cid")
+    pending_urls+=("$curl")
+  done < "$CURATION_FILE"
+
+  local pending_count=${#pending_ids[@]}
+
+  echo "=== career-ops deep eval ==="
+  echo "Max retries: $MAX_RETRIES"
+  echo "Approved: $pending_count jobs to evaluate"
+  echo ""
+
+  if (( pending_count == 0 )); then
+    echo "No jobs to evaluate."
+    echo "Check that batch/curation.tsv has rows with decision=APPROVE."
+    deep_summary
+    exit 0
+  fi
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "=== DRY RUN ==="
+    for i in "${!pending_ids[@]}"; do
+      local s
+      s=$(get_deep_status "${pending_ids[$i]}")
+      echo "  #${pending_ids[$i]}: ${pending_urls[$i]} (status: $s)"
+    done
+    echo ""
+    echo "Would deep-eval $pending_count jobs."
+    exit 0
+  fi
+
+  acquire_lock
+
+  deep_job() {
+    local id="$1" url="$2"
+    local started_at
+    started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    local retries
+    retries=$(get_deep_retries "$id")
+    local log_file="$LOGS_DIR/deep-${id}.log"
+    local tmp_out="/tmp/career-ops-deep-${id}.json"
+
+    # Pre-allocate report number (with state lock so concurrent runs don't collide)
+    local report_num
+    report_num=$(reserve_report_num "$id" "$url" "$started_at" "$retries")
+
+    # Derive slug from company name (lowercase, hyphens, no special chars)
+    # We don't know company yet — use id as slug; worker may rename but report_num is locked
+    local company_slug="job-${id}"
+    local report_file="reports/${report_num}-${company_slug}-${today}.md"
+    local tracker_tsv_path="$TRACKER_DIR/${report_num}-${company_slug}.tsv"
+
+    local triage_file="$BATCH_DIR/triage-output/${id}.json"
+    local triage_arg=""
+    if [[ -f "$triage_file" ]]; then
+      triage_arg="--triage-file=$triage_file"
+    fi
+
+    echo "--- Deep eval #$id: $url (report $report_num)"
+
+    local exit_code=0
+    node "$PROJECT_DIR/batch/batch-worker-deep.mjs" \
+      --id="$id" \
+      --url="$url" \
+      --report-num="$report_num" \
+      --report-file="$report_file" \
+      --tracker-tsv="$tracker_tsv_path" \
+      --date="$today" \
+      $triage_arg \
+      > "$tmp_out" \
+      2>> "$log_file" \
+      || exit_code=$?
+
+    local completed_at
+    completed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    if [[ $exit_code -eq 0 ]]; then
+      # Parse score + company from worker stdout for state update and slug rename
+      local score company role
+      score=$(node -e "try{const j=JSON.parse(require('fs').readFileSync('$tmp_out','utf8'));console.log(j.score);}catch(e){console.log('-');}" 2>/dev/null || echo "-")
+      company=$(node -e "try{const j=JSON.parse(require('fs').readFileSync('$tmp_out','utf8'));console.log(j.company);}catch(e){console.log('');}" 2>/dev/null || echo "")
+      role=$(node -e "try{const j=JSON.parse(require('fs').readFileSync('$tmp_out','utf8'));console.log(j.role);}catch(e){console.log('');}" 2>/dev/null || echo "")
+
+      # Rename report/tsv with actual company slug if we got a company name
+      if [[ -n "$company" ]]; then
+        # Slugify: lowercase, replace non-alphanumeric with hyphens, collapse consecutive hyphens
+        local new_slug
+        new_slug=$(echo "$company" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/-\+/-/g' | sed 's/^-//;s/-$//')
+        local new_report="reports/${report_num}-${new_slug}-${today}.md"
+        local new_tsv="$TRACKER_DIR/${report_num}-${new_slug}.tsv"
+
+        # Move files if they exist under the placeholder name
+        [[ -f "$report_file" ]] && mv "$report_file" "$new_report" 2>/dev/null || true
+        [[ -f "$tracker_tsv_path" ]] && mv "$tracker_tsv_path" "$new_tsv" 2>/dev/null || true
+
+        # Update report_file reference in state
+        report_file="$new_report"
+        tracker_tsv_path="$new_tsv"
+      fi
+
+      rm -f "$tmp_out"
+      update_deep_state "$id" "$url" "completed" "$started_at" "$completed_at" "$report_num" "$score" "-" "$retries"
+      echo "    ✅ ${company:-?} — ${role:-?} | score=$score report=$report_file"
+    else
+      rm -f "$tmp_out"
+      local err_msg
+      err_msg=$(tail -3 "$log_file" 2>/dev/null | tr '\n' ' ' | cut -c1-200 || echo "exit code $exit_code")
+      retries=$((retries + 1))
+      update_deep_state "$id" "$url" "failed" "$started_at" "$completed_at" "$report_num" "-" "$err_msg" "$retries"
+      echo "    ❌ Failed (attempt $retries) — see $log_file"
+    fi
+  }
+
+  # Deep eval is always sequential (each call is long + uses web_search quota)
+  for i in "${!pending_ids[@]}"; do
+    deep_job "${pending_ids[$i]}" "${pending_urls[$i]}"
+  done
+
+  # Merge tracker additions and verify pipeline
+  merge_tracker
+
+  deep_summary
+
+  echo ""
+  echo "Deep eval complete."
+  echo "Review reports/ for full evaluations."
+  echo "Run 'node merge-tracker.mjs' if not auto-merged above."
+}
+
+deep_summary() {
+  echo ""
+  echo "=== Deep Eval Summary ==="
+  if [[ ! -f "$DEEP_STATE_FILE" ]]; then echo "No state file."; return; fi
+
+  local total=0 completed=0 failed=0
+  local score_sum=0 score_count=0
+
+  while IFS=$'\t' read -r sid _ sstatus _ _ _ sscore _ _; do
+    [[ "$sid" == "id" ]] && continue
+    total=$((total + 1))
+    case "$sstatus" in
+      completed)
+        completed=$((completed + 1))
+        if [[ "$sscore" != "-" && -n "$sscore" ]]; then
+          score_sum=$(echo "$score_sum + $sscore" | bc 2>/dev/null || echo "$score_sum")
+          score_count=$((score_count + 1))
+        fi
+        ;;
+      failed) failed=$((failed + 1)) ;;
+    esac
+  done < "$DEEP_STATE_FILE"
+
+  echo "Total: $total | Completed: $completed | Failed: $failed"
+  if (( score_count > 0 )); then
+    local avg
+    avg=$(echo "scale=1; $score_sum / $score_count" | bc 2>/dev/null || echo "N/A")
+    echo "Average score: $avg/5 ($score_count scored)"
+  fi
+}
+
 # Print summary
 print_summary() {
   echo ""
@@ -729,22 +1003,15 @@ main() {
       return
       ;;
     deep)
-      echo "ERROR: --mode=deep is not yet implemented (Phase 4)."
-      echo ""
-      echo "To run full evaluations manually:"
-      echo "  claude -p --dangerously-skip-permissions \\"
-      echo "    --append-system-prompt-file batch/batch-prompt.md \\"
-      echo "    'Process this job. URL: <url>'"
-      echo ""
-      echo "See batch/README.md for the current workflow."
-      exit 1
+      run_deep
+      return
       ;;
     "")
       echo ""
       echo "⚠️  The batch pipeline has been restructured. --mode is now required."
       echo ""
       echo "  --mode=triage   Step 1 — fit assessment on all scanned jobs"
-      echo "  --mode=deep     Step 3 — full evaluation on approved jobs [Phase 4]"
+      echo "  --mode=deep     Step 3 — full evaluation on approved jobs"
       echo ""
       echo "Workflow:"
       echo "  node scan.mjs"
