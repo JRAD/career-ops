@@ -12,6 +12,8 @@
  * Usage:
  *   node scan.mjs                  # scan all enabled companies
  *   node scan.mjs --dry-run        # preview without writing files
+ *   node scan.mjs --prune          # also remove closed pipeline entries
+ *   node scan.mjs --dry-run --prune  # preview both adds and removals
  *   node scan.mjs --company Cohere # scan a single company
  */
 
@@ -176,6 +178,98 @@ function buildLocationFilter(locationFilter) {
   };
 }
 
+// ── Prune helpers ───────────────────────────────────────────────────
+
+/**
+ * Parse ATS type, board slug, and job ID from a pipeline URL.
+ * Returns null for custom-domain Greenhouse URLs (e.g. okta.com?gh_jid=...)
+ * since the slug can't be reliably extracted — those are handled by the
+ * standalone check-pipeline-liveness.mjs instead.
+ */
+function extractJobInfo(url) {
+  // Standard Greenhouse: job-boards.greenhouse.io/{slug}/jobs/{id}
+  //                   or job-boards.eu.greenhouse.io/{slug}/jobs/{id}
+  let m = url.match(/job-boards(?:\.eu)?\.greenhouse\.io\/([^/?#]+)\/jobs\/(\d+)/);
+  if (m) return { ats: 'greenhouse', slug: m[1], id: m[2] };
+
+  // Older Greenhouse boards URL
+  m = url.match(/boards\.greenhouse\.io\/([^/?#]+)\/jobs\/(\d+)/);
+  if (m) return { ats: 'greenhouse', slug: m[1], id: m[2] };
+
+  // Lever: jobs.lever.co/{slug}/{uuid}
+  m = url.match(/jobs\.lever\.co\/([^/?#]+)\/([a-f0-9-]{36})/);
+  if (m) return { ats: 'lever', slug: m[1], id: m[2] };
+
+  // Ashby: jobs.ashbyhq.com/{slug}/{uuid}
+  m = url.match(/jobs\.ashbyhq\.com\/([^/?#]+)\/([a-f0-9-]{36})/);
+  if (m) return { ats: 'ashby', slug: m[1], id: m[2] };
+
+  return null;
+}
+
+/**
+ * Extract the board slug from the API URL used during a fetch.
+ * This is the key we use to look up active IDs later.
+ */
+function extractSlugFromApiUrl(apiUrl, type) {
+  if (type === 'greenhouse') {
+    const m = apiUrl.match(/boards-api\.greenhouse\.io\/v1\/boards\/([^/?#]+)/);
+    return m ? m[1] : null;
+  }
+  if (type === 'lever') {
+    const m = apiUrl.match(/api\.lever\.co\/v0\/postings\/([^/?#]+)/);
+    return m ? m[1] : null;
+  }
+  if (type === 'ashby') {
+    const m = apiUrl.match(/api\.ashbyhq\.com\/posting-api\/job-board\/([^/?#]+)/);
+    return m ? m[1] : null;
+  }
+  return null;
+}
+
+/**
+ * Remove pipeline.md entries whose job IDs are no longer in the
+ * boards that were successfully fetched this scan run.
+ *
+ * Only touches entries for companies we actually scanned — if a board
+ * errored or wasn't in this run, its entries are left alone.
+ *
+ * Returns the count of pruned entries (writes file unless dry=true).
+ */
+function prunePipeline(boardActiveIds, dry = false) {
+  if (!existsSync(PIPELINE_PATH)) return 0;
+
+  const text = readFileSync(PIPELINE_PATH, 'utf-8');
+  const lines = text.split('\n');
+  const pruned = [];
+
+  const kept = lines.filter(line => {
+    const m = line.match(/^- \[ \] (https?:\/\/\S+)/);
+    if (!m) return true; // header, blank, [x] entry — keep as-is
+
+    const url = m[1];
+    const info = extractJobInfo(url);
+    if (!info) return true; // custom-domain or unknown format — keep
+
+    const key = `${info.ats}::${info.slug}`;
+    const boardIds = boardActiveIds.get(key);
+    if (!boardIds) return true; // board not scanned this run — keep
+
+    if (!boardIds.has(info.id)) {
+      pruned.push(line);
+      return false; // job no longer in board → closed
+    }
+    return true;
+  });
+
+  if (pruned.length > 0 && !dry) {
+    const cleaned = kept.join('\n').replace(/\n{3,}/g, '\n\n');
+    writeFileSync(PIPELINE_PATH, cleaned, 'utf-8');
+  }
+
+  return pruned.length;
+}
+
 // ── Dedup ───────────────────────────────────────────────────────────
 
 function loadSeenUrls() {
@@ -294,6 +388,7 @@ async function parallelFetch(tasks, limit) {
 async function main() {
   const args = process.argv.slice(2);
   const dryRun = args.includes('--dry-run');
+  const pruneMode = args.includes('--prune');
   const companyFlag = args.indexOf('--company');
   const filterCompany = companyFlag !== -1 ? args[companyFlag + 1]?.toLowerCase() : null;
 
@@ -318,7 +413,9 @@ async function main() {
   const skippedCount = companies.filter(c => c.enabled !== false).length - targets.length;
 
   console.log(`Scanning ${targets.length} companies via API (${skippedCount} skipped — no API detected)`);
-  if (dryRun) console.log('(dry run — no files will be written)\n');
+  if (dryRun) console.log('(dry run — no files will be written)');
+  if (pruneMode) console.log('(prune mode — closed pipeline entries will be removed)');
+  if (dryRun || pruneMode) console.log();
 
   // 3. Load dedup sets
   const seenUrls = loadSeenUrls();
@@ -349,14 +446,28 @@ async function main() {
   const newOffers = [];
   const errors = [];
 
+  // Prune: maps `${ats}::${slug}` → Set of active job IDs (populated on success only)
+  const boardActiveIds = new Map();
+
   const tasks = targets.map(company => async () => {
     const { type, url } = company._api;
     try {
       const json = await fetchJson(url);
       const jobs = PARSERS[type](json, company.name);
       processJobs(jobs, `${type}-api`);
+
+      // Collect unfiltered active IDs for prune — a job is "alive" even if
+      // it doesn't match our title/location filters, so we work from the raw list.
+      if (pruneMode) {
+        const slug = extractSlugFromApiUrl(url, type);
+        if (slug) {
+          const ids = new Set(jobs.map(j => extractJobInfo(j.url)?.id).filter(Boolean));
+          boardActiveIds.set(`${type}::${slug}`, ids);
+        }
+      }
     } catch (err) {
       errors.push({ company: company.name, error: err.message });
+      // No entry added to boardActiveIds on error — prune skips this company
     }
   });
 
@@ -383,13 +494,16 @@ async function main() {
     await parallelFetch(boardTasks, CONCURRENCY);
   }
 
-  // 6. Write results
+  // 6. Write new results
   if (!dryRun && newOffers.length > 0) {
     appendToPipeline(newOffers);
     appendToScanHistory(newOffers, date);
   }
 
-  // 7. Print summary
+  // 7. Prune closed pipeline entries
+  const pruneCount = pruneMode ? prunePipeline(boardActiveIds, dryRun) : 0;
+
+  // 8. Print summary
   const boardCount = remoteBoards.length;
   console.log(`\n${'━'.repeat(45)}`);
   console.log(`Portal Scan — ${date}`);
@@ -403,6 +517,9 @@ async function main() {
   console.log(`Filtered by location:  ${totalLocationFiltered} removed`);
   console.log(`Duplicates:            ${totalDupes} skipped`);
   console.log(`New offers added:      ${newOffers.length}`);
+  if (pruneMode) {
+    console.log(`Closed entries pruned: ${pruneCount}${dryRun ? ' (dry run — not written)' : ''}`);
+  }
 
   if (errors.length > 0) {
     console.log(`\nErrors (${errors.length}):`);
@@ -416,11 +533,20 @@ async function main() {
     for (const o of newOffers) {
       console.log(`  + ${o.company} | ${o.title} | ${o.location || 'N/A'}`);
     }
-    if (dryRun) {
-      console.log('\n(dry run — run without --dry-run to save results)');
-    } else {
-      console.log(`\nResults saved to ${PIPELINE_PATH} and ${SCAN_HISTORY_PATH}`);
-    }
+  }
+
+  if (dryRun) {
+    console.log('\n(dry run — run without --dry-run to save results)');
+  } else if (newOffers.length > 0 || pruneCount > 0) {
+    console.log(`\nResults saved to ${PIPELINE_PATH}${newOffers.length > 0 ? ` and ${SCAN_HISTORY_PATH}` : ''}`);
+  }
+
+  if (pruneMode && pruneCount === 0) {
+    console.log('\nNo closed entries found — pipeline is clean for scanned companies.');
+  }
+  if (pruneMode && !filterCompany) {
+    console.log('Note: custom-domain entries (Okta, HelloFresh, etc.) are not checked by --prune.');
+    console.log('      Run check-pipeline-liveness.mjs for a full deep-clean.');
   }
 
   console.log(`\n→ Run /career-ops pipeline to evaluate new offers.`);
