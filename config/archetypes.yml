@@ -11,14 +11,6 @@ archetypes:
     signals: [platform, "developer experience", "internal tooling", reliability, SLO, SLA, Kubernetes, observability, "developer productivity", "build systems"]
     buy: Someone who multiplies other engineers' productivity through platforms and tooling
 
-  - name: Data / Streaming Engineer
-    signals: ["data pipeline", ETL, Kafka, Spark, Flink, streaming, "batch processing", "data infrastructure", "high throughput", "event-driven"]
-    buy: Someone who builds reliable data infrastructure and pipelines at scale
-
-  - name: Distributed Systems Engineer
-    signals: ["distributed systems", scalability, "low latency", "high performance", consensus, sharding, caching, "systems design", concurrency, "database internals"]
-    buy: Someone with deep systems expertise for hard scalability and reliability problems
-
   - name: SDET / Test Automation Engineer
     signals: ["test automation", Selenium, Playwright, Cypress, "test framework", "automated testing", "CI/CD", "quality assurance", QA, "end-to-end testing", "integration testing"]
     buy: Someone who builds automation frameworks that replace manual testing and integrate with CI/CD

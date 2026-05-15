@@ -104,7 +104,31 @@ function parseLever(json, companyName) {
   }));
 }
 
+// Remote board parsers — each job carries its own company name
+
+function parseRemotive(json, _sourceName) {
+  const jobs = json.jobs || [];
+  return jobs.map(j => ({
+    title: j.title || '',
+    url: j.url || '',
+    company: j.company_name || '',
+    location: j.candidate_required_location || '',
+  }));
+}
+
+function parseWeworkremotely(json, _sourceName) {
+  // WWR returns { jobs: [{ title, url, company, region }] } from their unofficial JSON endpoint
+  const jobs = Array.isArray(json) ? json : (json.jobs || []);
+  return jobs.map(j => ({
+    title: j.title || j.subject || '',
+    url: j.url || j.link || '',
+    company: j.company || j.company_name || '',
+    location: j.region || j.location || 'Remote',
+  }));
+}
+
 const PARSERS = { greenhouse: parseGreenhouse, ashby: parseAshby, lever: parseLever };
+const BOARD_PARSERS = { remotive: parseRemotive, weworkremotely: parseWeworkremotely };
 
 // ── Fetch with timeout ──────────────────────────────────────────────
 
@@ -131,6 +155,24 @@ function buildTitleFilter(titleFilter) {
     const hasPositive = positive.length === 0 || positive.some(k => lower.includes(k));
     const hasNegative = negative.some(k => lower.includes(k));
     return hasPositive && !hasNegative;
+  };
+}
+
+// ── Location filter ─────────────────────────────────────────────────
+
+function buildLocationFilter(locationFilter) {
+  const positive = (locationFilter?.positive || []).map(k => k.toLowerCase());
+  const negative = (locationFilter?.negative || []).map(k => k.toLowerCase());
+
+  return (location) => {
+    // Empty/unknown location always passes — many US remote roles have blank location fields
+    if (!location || location.trim() === '') return true;
+    const lower = location.toLowerCase();
+    // If positive terms set, location must match at least one
+    const passesPositive = positive.length === 0 || positive.some(k => lower.includes(k));
+    // If location matches any negative term, drop it
+    const failsNegative = negative.some(k => lower.includes(k));
+    return passesPositive && !failsNegative;
   };
 }
 
@@ -264,6 +306,7 @@ async function main() {
   const config = parseYaml(readFileSync(PORTALS_PATH, 'utf-8'));
   const companies = config.tracked_companies || [];
   const titleFilter = buildTitleFilter(config.title_filter);
+  const locationFilter = buildLocationFilter(config.location_filter);
 
   // 2. Filter to enabled companies with detectable APIs
   const targets = companies
@@ -281,10 +324,27 @@ async function main() {
   const seenUrls = loadSeenUrls();
   const seenCompanyRoles = loadSeenCompanyRoles();
 
-  // 4. Fetch all APIs
+  // Helper: process a batch of raw jobs through filter + dedup
+  function processJobs(jobs, source) {
+    for (const job of jobs) {
+      totalFound++;
+      if (!job.url) { totalFiltered++; continue; }
+      if (!titleFilter(job.title)) { totalFiltered++; continue; }
+      if (!locationFilter(job.location)) { totalLocationFiltered++; continue; }
+      if (seenUrls.has(job.url)) { totalDupes++; continue; }
+      const key = `${(job.company || '').toLowerCase()}::${job.title.toLowerCase()}`;
+      if (seenCompanyRoles.has(key)) { totalDupes++; continue; }
+      seenUrls.add(job.url);
+      seenCompanyRoles.add(key);
+      newOffers.push({ ...job, source });
+    }
+  }
+
+  // 4. Fetch tracked-company APIs
   const date = new Date().toISOString().slice(0, 10);
   let totalFound = 0;
   let totalFiltered = 0;
+  let totalLocationFiltered = 0;
   let totalDupes = 0;
   const newOffers = [];
   const errors = [];
@@ -294,27 +354,7 @@ async function main() {
     try {
       const json = await fetchJson(url);
       const jobs = PARSERS[type](json, company.name);
-      totalFound += jobs.length;
-
-      for (const job of jobs) {
-        if (!titleFilter(job.title)) {
-          totalFiltered++;
-          continue;
-        }
-        if (seenUrls.has(job.url)) {
-          totalDupes++;
-          continue;
-        }
-        const key = `${job.company.toLowerCase()}::${job.title.toLowerCase()}`;
-        if (seenCompanyRoles.has(key)) {
-          totalDupes++;
-          continue;
-        }
-        // Mark as seen to avoid intra-scan dupes
-        seenUrls.add(job.url);
-        seenCompanyRoles.add(key);
-        newOffers.push({ ...job, source: `${type}-api` });
-      }
+      processJobs(jobs, `${type}-api`);
     } catch (err) {
       errors.push({ company: company.name, error: err.message });
     }
@@ -322,19 +362,45 @@ async function main() {
 
   await parallelFetch(tasks, CONCURRENCY);
 
-  // 5. Write results
+  // 5. Fetch remote job boards (Remotive, etc.)
+  const remoteBoards = (config.remote_boards || []).filter(b => b.enabled !== false);
+
+  if (remoteBoards.length > 0) {
+    const boardTasks = remoteBoards.map(board => async () => {
+      const parser = BOARD_PARSERS[board.api_provider];
+      if (!parser) {
+        errors.push({ company: board.name, error: `Unknown api_provider: ${board.api_provider}` });
+        return;
+      }
+      try {
+        const json = await fetchJson(board.api);
+        const jobs = parser(json, board.name);
+        processJobs(jobs, board.name);
+      } catch (err) {
+        errors.push({ company: board.name, error: err.message });
+      }
+    });
+    await parallelFetch(boardTasks, CONCURRENCY);
+  }
+
+  // 6. Write results
   if (!dryRun && newOffers.length > 0) {
     appendToPipeline(newOffers);
     appendToScanHistory(newOffers, date);
   }
 
-  // 6. Print summary
+  // 7. Print summary
+  const boardCount = remoteBoards.length;
   console.log(`\n${'━'.repeat(45)}`);
   console.log(`Portal Scan — ${date}`);
   console.log(`${'━'.repeat(45)}`);
   console.log(`Companies scanned:     ${targets.length}`);
+  if (boardCount > 0) {
+    console.log(`Remote boards:         ${boardCount}`);
+  }
   console.log(`Total jobs found:      ${totalFound}`);
   console.log(`Filtered by title:     ${totalFiltered} removed`);
+  console.log(`Filtered by location:  ${totalLocationFiltered} removed`);
   console.log(`Duplicates:            ${totalDupes} skipped`);
   console.log(`New offers added:      ${newOffers.length}`);
 
