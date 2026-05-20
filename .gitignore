@@ -10,11 +10,26 @@ output/*
 batch/logs/*
 !batch/logs/.gitkeep
 batch/batch-state.tsv
+batch/triage-state.tsv
+batch/curation.tsv
 batch/batch-input.tsv
+batch/triage-output/
 batch/tracker-additions/**/*.tsv
 !batch/tracker-additions/.gitkeep
 jds/*
 !jds/.gitkeep
+
+# Interview prep and personal proof points
+interview-prep/*.md
+!interview-prep/.gitkeep
+article-digest.md
+
+# Pipeline scan artifacts
+data/pipeline-liveness-report.json
+data/unlikely-batch.md
+
+# Claude Code worktrees
+.claude/worktrees/
 
 # User config and customization (never auto-updated)
 config/profile.yml
