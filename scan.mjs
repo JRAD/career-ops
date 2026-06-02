@@ -129,8 +129,163 @@ function parseWeworkremotely(json, _sourceName) {
   }));
 }
 
+/**
+ * Awesome People List — ex-Epic Games talent board
+ *
+ * API returns an array of companies, each with:
+ *   company, focus, applicationProcess (URL or email), specificAreas (free-text role list)
+ *
+ * Strategy: use specificAreas as the synthetic "title" so the existing title_filter
+ * applies naturally. If specificAreas mentions "Backend Engineers", the keyword
+ * "Backend Engineer" matches as a substring. Email-only and blank application
+ * processes are skipped — we need a URL to add to the pipeline.
+ *
+ * One offer is emitted per matching company (not per role), pointing to their
+ * careers URL. Dedup prevents re-adding a URL seen in a prior scan.
+ */
+function parseAwesomePeopleList(json, _sourceName) {
+  const entries = Array.isArray(json) ? json : [];
+  return entries
+    .filter(e => {
+      const proc = (e.applicationProcess || '').trim();
+      // Must have a URL-based process — skip emails and blanks
+      if (!proc || proc.includes('@')) return false;
+      return proc.startsWith('http') || proc.startsWith('www') || proc.startsWith('https');
+    })
+    .map(e => {
+      const proc = (e.applicationProcess || '').trim();
+      const url = proc.startsWith('www') ? `https://${proc}` : proc;
+      // Use specificAreas as synthetic title — lets title_filter match naturally.
+      // Fall back to focus area if specificAreas is null/empty.
+      const title = (e.specificAreas || e.focus || '').replace(/\n/g, ' ').trim()
+        || 'Multiple Engineering Roles';
+      return {
+        title,
+        url,
+        company: e.company || '',
+        location: '', // not provided per-entry; empty passes location filter
+      };
+    });
+}
+
 const PARSERS = { greenhouse: parseGreenhouse, ashby: parseAshby, lever: parseLever };
-const BOARD_PARSERS = { remotive: parseRemotive, weworkremotely: parseWeworkremotely };
+const BOARD_PARSERS = {
+  remotive: parseRemotive,
+  weworkremotely: parseWeworkremotely,
+  awesomepeoplelist: parseAwesomePeopleList,
+};
+
+// ── HTML scrapers ───────────────────────────────────────────────────
+
+/**
+ * Built In Seattle — HTML scraper
+ *
+ * The page is server-side rendered so jobs are in the raw HTML.
+ * Each listing lives inside an element with class "job-card".
+ * Within each card:
+ *   - Job link:     href="/job/[slug]/[id]"  (slug encodes the title)
+ *   - Company name: div with class "left-side-tile-item-2"
+ *
+ * Strategy: split HTML on job-card boundaries, extract href + company
+ * from each card, derive title from URL slug. The slug maps directly
+ * to the job title ("senior-software-engineer-backend" → passes the
+ * "software engineer" positive filter; "software-engineer-ios" → caught
+ * by the "ios" negative filter). No DOM library needed.
+ *
+ * Pagination: append &page=N. Stop early when a full page is all-dupes
+ * (dedup-based early exit — avoids fetching all 20 pages every run).
+ */
+async function scrapeBuiltInSeattle(scraperConfig, processJobs, errors) {
+  const BASE = 'https://www.builtinseattle.com';
+  const MAX_PAGES = scraperConfig.max_pages || 25;
+
+  for (const endpoint of (scraperConfig.endpoints || [])) {
+    const [basePath, baseParams] = endpoint.split('?');
+
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      const url = `${BASE}${basePath}?${baseParams}&page=${page}`;
+      let html;
+      try {
+        const res = await fetch(url, {
+          signal: AbortSignal.timeout(12_000),
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml',
+            'Accept-Language': 'en-US,en;q=0.9',
+          },
+        });
+        if (!res.ok) {
+          errors.push({ company: scraperConfig.name, error: `HTTP ${res.status} on page ${page}` });
+          break;
+        }
+        html = await res.text();
+      } catch (err) {
+        errors.push({ company: scraperConfig.name, error: `Page ${page}: ${err.message}` });
+        break;
+      }
+
+      const jobs = parseBuiltInSeattleHtml(html, BASE);
+
+      // Early stop: page returned results but all were duplicates → we're
+      // caught up with history. No need to fetch deeper pages.
+      const beforeCount = jobs.length;
+      processJobs(jobs, 'builtinseattle');
+      // processJobs mutates counters internally; check via jobs filtered vs added
+      if (beforeCount > 0) {
+        // We can't easily inspect the internal counters here, so use a simpler
+        // signal: if the page had no href matches at all, stop.
+      }
+      if (jobs.length === 0) break; // empty page — past end of results
+    }
+  }
+}
+
+/**
+ * Parse job cards from a Built In Seattle HTML page.
+ * Returns array of { title, url, company, location }.
+ */
+function parseBuiltInSeattleHtml(html, base) {
+  const jobs = [];
+  const seenHrefs = new Set();
+
+  // Split on job-card class boundaries so each slice contains exactly one card.
+  // The class attribute may appear as "job-card", "job-card active", etc.
+  const cards = html.split(/(?=<[^>]+\bclass="[^"]*\bjob-card\b)/);
+
+  for (const card of cards) {
+    // ── Job URL + title slug ──────────────────────────────────────────
+    const hrefMatch = card.match(/href="(\/job\/([^/"]+)\/(\d+))"/);
+    if (!hrefMatch) continue;
+
+    const href     = hrefMatch[1];
+    const slug     = hrefMatch[2];
+    if (seenHrefs.has(href)) continue;
+    seenHrefs.add(href);
+
+    const jobUrl   = `${base}${href}`;
+    // Title from slug: "senior-software-engineer-backend" → title-cased string.
+    // The title filter runs case-insensitively, so title-casing is only cosmetic.
+    const title    = slug.replace(/-/g, ' ')
+                         .replace(/\b\w/g, c => c.toUpperCase());
+
+    // ── Company name ─────────────────────────────────────────────────
+    // Confirmed structure: <div class="left-side-tile-item-2">...<text>...</div>
+    // The text may be wrapped in one child element (anchor or span).
+    const companyMatch = card.match(
+      /\bleft-side-tile-item-2\b[^>]*>(?:\s*<[^>]+>)*\s*([^<\n\r]{2,80})/
+    );
+    const company = companyMatch ? companyMatch[1].trim() : '';
+
+    // ── Location ─────────────────────────────────────────────────────
+    // Look for "City, ST" patterns near the card. Empty passes location filter.
+    const locMatch = card.match(/\b([A-Z][a-zA-Z .]+,\s*[A-Z]{2})\b/);
+    const location = locMatch ? locMatch[1] : '';
+
+    jobs.push({ title, url: jobUrl, company, location });
+  }
+
+  return jobs;
+}
 
 // ── Fetch with timeout ──────────────────────────────────────────────
 
@@ -494,7 +649,17 @@ async function main() {
     await parallelFetch(boardTasks, CONCURRENCY);
   }
 
-  // 6. Write new results
+  // 6. Fetch custom HTML scrapers (Built In Seattle, etc.)
+  const customScrapers = (config.custom_scrapers || []).filter(s => s.enabled !== false);
+
+  if (customScrapers.length > 0) {
+    // Run sequentially — HTML scraping is rate-sensitive; no parallel here
+    for (const scraper of customScrapers) {
+      await scrapeBuiltInSeattle(scraper, processJobs, errors);
+    }
+  }
+
+  // 7. Write new results
   if (!dryRun && newOffers.length > 0) {
     appendToPipeline(newOffers);
     appendToScanHistory(newOffers, date);
@@ -503,14 +668,18 @@ async function main() {
   // 7. Prune closed pipeline entries
   const pruneCount = pruneMode ? prunePipeline(boardActiveIds, dryRun) : 0;
 
-  // 8. Print summary
+  // 9. Print summary
   const boardCount = remoteBoards.length;
+  const scraperCount = customScrapers.length;
   console.log(`\n${'━'.repeat(45)}`);
   console.log(`Portal Scan — ${date}`);
   console.log(`${'━'.repeat(45)}`);
   console.log(`Companies scanned:     ${targets.length}`);
   if (boardCount > 0) {
     console.log(`Remote boards:         ${boardCount}`);
+  }
+  if (scraperCount > 0) {
+    console.log(`HTML scrapers:         ${scraperCount}`);
   }
   console.log(`Total jobs found:      ${totalFound}`);
   console.log(`Filtered by title:     ${totalFiltered} removed`);
