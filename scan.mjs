@@ -333,6 +333,17 @@ function buildLocationFilter(locationFilter) {
   };
 }
 
+// ── Company blocklist filter ─────────────────────────────────────────
+
+function buildCompanyFilter(blocklist) {
+  const blocked = (blocklist || []).map(k => k.toLowerCase());
+  return (company) => {
+    if (!blocked.length) return true;
+    const lower = (company || '').toLowerCase();
+    return !blocked.some(k => lower.includes(k));
+  };
+}
+
 // ── Prune helpers ───────────────────────────────────────────────────
 
 /**
@@ -557,6 +568,7 @@ async function main() {
   const companies = config.tracked_companies || [];
   const titleFilter = buildTitleFilter(config.title_filter);
   const locationFilter = buildLocationFilter(config.location_filter);
+  const companyFilter = buildCompanyFilter(config.company_blocklist);
 
   // 2. Filter to enabled companies with detectable APIs
   const targets = companies
@@ -581,6 +593,7 @@ async function main() {
     for (const job of jobs) {
       totalFound++;
       if (!job.url) { totalFiltered++; continue; }
+      if (!companyFilter(job.company)) { totalFiltered++; continue; }
       if (!titleFilter(job.title)) { totalFiltered++; continue; }
       if (!locationFilter(job.location)) { totalLocationFiltered++; continue; }
       if (seenUrls.has(job.url)) { totalDupes++; continue; }
